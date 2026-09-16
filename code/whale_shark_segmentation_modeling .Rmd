@@ -1,0 +1,408 @@
+---
+title: "data_preprocessing_and_segmentation"
+author: "Madelyne Zhang, Leo Lyu"
+date: "`r Sys.Date()`"
+output:
+  bookdown::html_document2:
+    number_sections: true
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: flatly
+    highlight: pygments
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+## Data Preprocessing and Segmentation
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(aniMotum)
+library(dplyr)
+library(ggplot2)
+library(sf)
+
+sharks_raw <- read_csv("final_whale_shark.csv") %>%
+  mutate(
+    date = stringr::str_replace(date, "-\\s+", "-"),
+    date = ymd_hms(date)
+  ) %>%
+  filter(!is.na(date)) %>%
+  arrange(id, date)
+```
+
+```{r}
+sharks_gap <- sharks_raw %>%
+  group_by(id) %>%
+  arrange(date) %>%
+  mutate(
+    dt_hours = as.numeric(difftime(date, lag(date), units = "hours")),
+    gap_flag = if_else(dt_hours > 7 * 24, 1, 0)
+  ) %>%
+  mutate(
+    segment_id = cumsum(replace_na(gap_flag, 0))
+  ) %>%
+  ungroup()
+
+```
+
+```{r}
+# Retain segments with sufficient observations (>= 20) and create unique segment identifier (id_segment)
+
+shark_segments <- sharks_gap %>%
+  group_by(id, segment_id) %>%
+  filter(n() >= 20) %>%
+  ungroup() %>%
+  mutate(
+    id_segment = paste(id, segment_id, sep = "_")
+  )
+```
+
+```{r}
+# Count number of observations retained per segment
+shark_segments %>%
+  count(id_segment) %>%
+  arrange(desc(n))
+```
+
+```{r}
+# Log distribution of time gaps within retained segments
+shark_segments %>%
+  group_by(id_segment) %>%
+  mutate(
+    dt_hours = as.numeric(difftime(date, lag(date), units="hours"))
+  ) %>%
+  ggplot(aes(dt_hours)) +
+  geom_histogram(bins = 60) +
+  scale_x_log10() +
+  theme_bw()
+
+```
+
+Temporal span of each retained segment Duration in days and years:
+```{r}
+segment_duration <- shark_segments %>%
+  group_by(id_segment) %>%
+  summarise(
+    n_obs = n(),
+    start_time = min(date),
+    end_time = max(date),
+    duration_days = as.numeric(difftime(end_time, start_time, units = "days")),
+    duration_years = duration_days / 365
+  ) %>%
+  arrange(desc(duration_days))
+```
+
+```{r}
+segment_duration
+```
+
+```{r}
+# relationship between segment duration and number of observations
+ggplot(segment_duration, aes(x = duration_days, y = n_obs)) +
+  geom_point(alpha = 0.6) +
+  theme_bw() +
+  labs(
+    x = "Segment duration (days)",
+    y = "Number of observations"
+  )
+```
+
+```{r}
+ggplot(shark_segments, aes(x = date, y = id_segment)) +
+  geom_point(alpha = 0.4, size = 0.8) +
+  theme_bw() +
+  labs(
+    x = "Time",
+    y = "Segment ID"
+  )
+```
+
+
+```{r}
+# Assessment of segment quality
+segment_quality <- shark_segments %>%
+  group_by(id_segment) %>%
+  arrange(date) %>%
+  summarise(
+    n_obs = n(),
+    start = min(date),
+    end = max(date),
+    duration_days = as.numeric(difftime(end, start, units = "days")),
+    obs_per_day = n_obs / duration_days,
+    median_gap_hours = median(as.numeric(difftime(date, lag(date), units = "hours")), na.rm = TRUE),
+    max_gap_hours = max(as.numeric(difftime(date, lag(date), units = "hours")), na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+segment_quality %>% arrange(desc(max_gap_hours))
+```
+
+
+## SSM fit
+
+```{r}
+# Final modeling dataset for SSM
+sharks_ssm_input <- shark_segments %>%
+  filter(
+    !is.na(date),
+    !is.na(lon),
+    !is.na(lat)
+  ) %>%
+  arrange(id_segment, date) %>%
+  distinct(id_segment, date, .keep_all = TRUE) %>%
+  group_by(id_segment) %>%
+  filter(
+    n() >= 3,
+    all(diff(date) > 0)
+  ) %>%
+  ungroup() %>%
+  mutate(id = id_segment)
+
+```
+
+
+```{r}
+ssm_fit <- fit_ssm(
+  sharks_ssm_input,
+  model = "crw",
+  time.step = 24,
+  vmax = 2.7,
+  control = ssm_control(verbose = 0)
+)
+```
+
+```{r}
+ssm_fit
+```
+All the segmented id remained successfully converged!
+
+```{r}
+# Extract fitted and predicted tracks
+sharks_predicted <- grab(ssm_fit, what = "predicted") %>%
+  as_tibble()
+
+sharks_fitted <- grab(ssm_fit, what = "fitted") %>%
+  as_tibble()
+```
+
+### Visualization
+
+```{r}
+aniMotum::map(ssm_fit, what = "predicted")
+```
+
+### Example check of SSM fit
+
+```{r}
+example_id <- "184027_7"
+
+plot(
+  ssm_fit |> dplyr::filter(id == example_id),
+  what = "predicted",
+  type = 1
+)
+
+plot(
+  ssm_fit |> dplyr::filter(id == example_id),
+  what = "predicted",
+  type = 2
+)
+
+```
+
+### SSM diagnostics
+
+```{r}
+ggplot(sharks_predicted, aes(x = x.se)) +
+  geom_histogram(bins = 50) +
+  theme_bw()
+
+```
+
+## Fit MPM
+
+```{r}
+pmm_fit <- fit_mpm(
+  sharks_predicted,
+  model = "mpm",
+  control = mpm_control(verbose = 0)
+)
+
+```
+
+```{r}
+pmm_fit
+```
+id 112563_0, 172246_2, 175953_3, 203645_2, 203646_1 failed to converged.
+
+```{r}
+# Filter out invalid
+pmm_valid <- pmm_fit %>%
+  filter(converged == TRUE)
+```
+
+```{r}
+# Extract gamma 
+mpm_gamma <- grab(pmm_valid, what = "fitted") %>%
+  as_tibble()
+```
+
+```{r}
+latent_movement <- sharks_predicted %>%
+  select(id, date, lon, lat, x, y, x.se, y.se) %>%
+  left_join(
+    mpm_gamma %>% select(id, date, g),
+    by = c("id", "date")
+  )
+
+```
+
+```{r}
+latent_movement %>%
+  summarise(
+    n_total = n(),
+    n_missing_gamma = sum(is.na(g))
+  )
+```
+
+```{r}
+ggplot(latent_movement, aes(x = g)) +
+  geom_histogram(bins = 50) +
+  theme_bw()
+```
+
+### Visualization of sharks remained 
+
+#### Overall visualization
+```{r}
+library(sf)
+
+latent_sf <- latent_movement %>%
+  filter(!is.na(g)) %>%
+  st_as_sf(coords = c("lon", "lat")) %>%
+  st_set_crs(4326)
+
+ggplot() +
+  geom_sf(data = rnaturalearth::ne_countries(scale="medium", returnclass="sf"),
+          fill="grey90", colour="grey70") +
+  geom_sf(data = latent_sf,
+          aes(colour = g),
+          size = 0.8,
+          alpha = 0.8) +
+  scale_colour_viridis_c(limits = c(0,1)) +
+  theme_bw()
+
+```
+
+#### Example id visualization
+
+```{r}
+example_id_1<- "120702_0"
+
+pmm_one <- pmm_valid %>%
+  dplyr::filter(id == example_id_1)
+
+gamma_sf <- sharks_predicted %>%
+  filter(id == example_id_1) %>%
+  left_join(
+    grab(pmm_one, what = "fitted") %>% 
+      as_tibble() %>% 
+      select(id, date, g),
+    by = c("id", "date")
+  ) %>%
+  st_as_sf(coords = c("lon", "lat")) %>%
+  st_set_crs(4326)
+
+ggplot(gamma_sf) +
+  geom_sf(aes(colour = g), size = 1) +
+  scale_colour_viridis_c(limits = c(0,1)) +
+  theme_bw() +
+  labs(title = example_id)
+
+```
+
+```{r}
+example_id_2<- "164969_7"
+
+pmm_one <- pmm_valid %>%
+  dplyr::filter(id == example_id_2)
+
+gamma_sf <- sharks_predicted %>%
+  filter(id == example_id_2) %>%
+  left_join(
+    grab(pmm_one, what = "fitted") %>% 
+      as_tibble() %>% 
+      select(id, date, g),
+    by = c("id", "date")
+  ) %>%
+  st_as_sf(coords = c("lon", "lat")) %>%
+  st_set_crs(4326)
+
+ggplot(gamma_sf) +
+  geom_sf(aes(colour = g), size = 1) +
+  scale_colour_viridis_c(limits = c(0,1)) +
+  theme_bw() +
+  labs(title = example_id_2)
+```
+
+## Dataframe extraction
+
+```{r}
+sharks_predicted <- grab(ssm_fit, what = "predicted") %>%
+  as_tibble()
+```
+
+```{r}
+pmm_valid <- pmm_fit %>%
+  filter(converged == TRUE)
+
+mpm_gamma <- grab(pmm_valid, what = "fitted") %>%
+  as_tibble()
+```
+
+```{r}
+analysis_df <- sharks_predicted %>%
+  select(
+    id,
+    date,
+    lon,
+    lat,
+    x,
+    y,
+    x.se,
+    y.se
+  ) %>%
+  left_join(
+    mpm_gamma %>% select(id, date, g),
+    by = c("id", "date")
+  )
+```
+
+```{r}
+analysis_df <- analysis_df %>%
+  filter(!is.na(g))
+analysis_df <- analysis_df %>%
+  arrange(id, date)
+```
+
+```{r}
+analysis_df <- analysis_df %>%
+  group_by(id) %>%
+  mutate(
+    year = lubridate::year(date),
+    month = lubridate::month(date),
+    doy = lubridate::yday(date),
+    step_id = row_number()
+  ) %>%
+  ungroup()
+```
+
+```{r}
+saveRDS(analysis_df, "shark_analysis_df.rds")
+saveRDS(sharks_predicted, "sharks_predicted_segments.rds")
+saveRDS(sharks_fitted, "sharks_fitted_segments.rds")
+```

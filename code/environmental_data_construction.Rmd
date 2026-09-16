@@ -1,0 +1,127 @@
+---
+title: "environmental_data_construction"
+author: "Madelyne Zhang, Leo Lyu"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+# install.packages("rerddap")
+# install.packages("rerddapXtracto")
+library(rerddap)
+library(rerddapXtracto)
+library(dplyr)
+
+# Retrieve metadata for the NOAA OISST daily dataset
+info("ncdcOisst21Agg_LonPM180")
+
+# Read RDS
+analysis_df <- readRDS("/Users/madelynezhang/whale-shark-movement/analysis/shark_analysis_df.rds")
+
+```
+
+```{r}
+# Retrieve dataset metadata object
+dataInfo <- rerddap::info("ncdcOisst21Agg_LonPM180")
+
+# Convert timestamp to Date
+analysis_df$date_day <- as.Date(analysis_df$date)
+
+years <- unique(format(analysis_df$date_day, "%Y"))
+
+analysis_df$sst <- NA_real_
+
+for (yr in years) {
+
+  message("Processing year: ", yr)
+
+  sub_df <- analysis_df[format(analysis_df$date_day, "%Y") == yr, ]
+
+  if (nrow(sub_df) == 0) next
+
+  sst_year <- rxtracto(
+    dataInfo,
+    parameter = "sst",
+    xcoord = sub_df$lon,
+    ycoord = sub_df$lat,
+    zcoord = rep(0, nrow(sub_df)),
+    tcoord = sub_df$date_day,
+    zName = "zlev",
+    xName = "longitude",
+    yName = "latitude",
+    tName = "time",
+    verbose = FALSE
+  )
+
+  analysis_df$sst[format(analysis_df$date_day, "%Y") == yr] <- sst_year[["mean sst"]]
+
+  gc()
+}
+
+```
+
+```{r}
+# Resolution check
+test_grid <- rerddap::griddap(
+  dataInfo,
+  time = c("2015-01-01", "2015-01-02"),
+  latitude = c(0, 1),
+  longitude = c(0, 1),
+  fields = "sst"
+)
+
+unique(diff(sort(unique(test_grid$data$latitude))))
+unique(diff(sort(unique(test_grid$data$longitude))))
+
+# Temporal resolution check (daily vs sub-daily)
+
+test_time <- rerddap::griddap(
+  dataInfo,
+  time = c("2015-01-01", "2015-01-10"),
+  zlev = c(0, 0),
+  latitude = c(0, 0),
+  longitude = c(0, 0),
+  fields = "sst"
+)
+
+tt <- sort(unique(test_time$data$time))
+
+# If time is character, convert to POSIXct
+if (is.character(tt)) {
+  tt <- as.POSIXct(tt, tz = "UTC")
+}
+
+# If time is numeric (days since ...), convert using its units if available
+if (is.numeric(tt)) {
+  tu <- test_time$info$variable$time$units
+  origin_str <- sub("days since ", "", tu)
+  tt <- as.POSIXct(tt * 86400, origin = origin_str, tz = "UTC")
+}
+
+unique(diff(tt))
+as.numeric(unique(diff(tt)), units = "hours")
+
+```
+
+```{r}
+# Sanity checks
+summary(analysis_df$sst)
+```
+
+
+```{r}
+analysis_df[sample(1:nrow(analysis_df), 5),
+            c("lon", "lat", "date_day", "sst")]
+```
+```{r}
+analysis_df %>%
+  group_by(date_day,id) %>%
+  summarise(unique_sst = n_distinct(sst)) %>%
+  head()
+
+```
+```{r}
+plot(analysis_df$date_day, analysis_df$sst,
+     pch = 16, cex = 0.5)
+```
+

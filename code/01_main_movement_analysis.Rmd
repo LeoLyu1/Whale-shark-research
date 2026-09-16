@@ -1,0 +1,1177 @@
+---
+title: "Whale Shark Movement Analysis"
+author: "Madelyne Zhang, Leo Lyu"
+date: "`r Sys.Date()`"
+output:
+  bookdown::html_document2:
+    number_sections: true
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: flatly
+    highlight: pygments
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(sf)
+library(patchwork)
+#install.packages("remotes")
+#install.packages(
+#  "aniMotum",
+#  repos = c(
+#    "https://cloud.r-project.org",
+#    "https://ianjonsen.r-universe.dev"
+#  ),
+#  dependencies = TRUE
+#)
+
+library(aniMotum)
+```
+
+### Data
+
+```{r}
+sharks <- read_csv("final_whale_shark.csv")
+
+sharks %>% 
+  count(id)
+
+sharks <- sharks %>%
+  mutate(
+    date = stringr::str_replace(date, "-\\s+", "-"),
+    date = ymd_hms(date)
+  )
+
+```
+
+```{r}
+# Check number of observations per individual 
+sharks %>% 
+    count(id) %>% 
+    arrange(desc(n))
+```
+
+```{r}
+# Summary of Argos location classes
+sharks %>% count(lc)
+```
+
+```{r}
+sharks <- sharks %>%  
+  arrange(id,date)
+sharks <- sharks %>%
+  filter(!is.na(date))
+
+# Largest time gap data check 
+sharks %>% 
+  filter (id == "172246")
+sharks %>% 
+  filter (id == "157790")
+
+sharks %>% 
+  filter (id =="203637")
+sharks %>% 
+  filter (id =="203638")
+sharks %>% 
+  filter (id =="203639")
+sharks %>% 
+  filter (id =="203644")
+sharks %>% 
+  filter (id =="203646")
+```
+
+
+```{r}
+# Split for individuals with large temporal gaps - 172246 and 157790
+# Also with 5 sharks that have huge movement that is "across the continent" after the MPM interpolation, which doesn't make sense biologically, so I headed back here at first to split these 5 sharks observations in advance. 
+
+split_table <- tibble(
+  id = c(
+    "172246",
+    "157790",
+    "203637",
+    "203638",
+    "203639",
+    "203644",
+    "203646"
+  ),
+  split_time = ymd_hms(c(
+    "2017-09-30 16:21:00",
+    "2018-03-28 22:30:00",
+    "2020-06-13 03:50:58",
+    "2020-06-14 01:25:45",
+    "2020-06-13 03:52:39",
+    "2020-06-13 03:52:00",
+    "2019-09-08 17:44:00"
+    
+  ))
+)
+
+
+```
+
+### EDA
+
+#### Observation time gap between sharks
+
+```{r}
+# Compute time gaps between consecutive observations within each individual
+sharks_dt <- sharks %>%
+  arrange(id, date) %>%
+  group_by(id) %>%
+  mutate(
+    dt_hours = as.numeric(difftime(date, lag(date), units = "hours"))
+  ) %>%
+  ungroup()
+
+# Time gap statistics per individual
+sharks_dt %>%
+  group_by(id) %>%
+  summarise(
+    n_obs = n(),
+    mean_dt = mean(dt_hours, na.rm = TRUE),
+    median_dt = median(dt_hours, na.rm = TRUE),
+    max_dt = max(dt_hours, na.rm = TRUE)
+  ) %>%
+  arrange(desc(max_dt))
+
+```
+
+```{r}
+sharks_dt %>%
+  summarise(
+    min_hours = min(dt_hours, na.rm = TRUE),
+    q1_hours = quantile(dt_hours, 0.25, na.rm = TRUE),
+    median_hours = median(dt_hours, na.rm = TRUE),
+    mean_hours = mean(dt_hours, na.rm = TRUE),
+    q3_hours = quantile(dt_hours, 0.75, na.rm = TRUE),
+    max_hours = max(dt_hours, na.rm = TRUE)
+  )
+```
+
+The median of the consecutive time gap is 0.73 hours, but the maximum gap is around 2.9 years, where the tracking window has a huge gap.
+Raw Argos telemetry exhibited highly irregular temporal sampling, with frequent short-interval transmissions interspersed with multi-month to multi-year gaps.
+
+```{r}
+# Time gap histogram 
+ggplot(sharks_dt, aes(x = dt_hours)) +
+  geom_histogram(bins = 60) +
+  scale_x_log10() +
+  theme_bw() +
+  labs(
+    x = "Time gap between observations (hours, log scale)",
+    y = "Count"
+  )
+
+```
+
+
+```{r}
+sharks <- sharks %>%
+  mutate(id = as.character(id))
+
+sharks <- sharks %>%
+  left_join(split_table, by = "id") %>%
+  mutate(
+    id = case_when(
+      is.na(split_time) ~ id,
+      date <= split_time ~ paste0(id, "_a"),
+      date >  split_time ~ paste0(id, "_b")
+    )
+  ) %>%
+  select(-split_time)
+
+sharks %>% 
+  count(id)
+```
+Initially, the raw df contains 60 sharks, but since two of them have long time gap which caused non-convergence in the first attempt of MPM, and 5 of the sharks' movement track contains the "over-continent" track, which doesn't make sense biologically, so these sharks are split into _a and _b to make further analysis. Therefore, with 7 sharks split to _a and _b, 67 sharks are remained. 
+
+```{r}
+# Raw Spatial tracks for each individual(points)
+ggplot(sharks, aes(x = lon, y = lat)) +
+  geom_point(alpha = 0.4) +
+  facet_wrap(~id) +
+  theme_bw()
+```
+
+```{r}
+# Raw Spatial tracks for each individual(path)
+ggplot(sharks, aes(x = lon, y = lat)) +
+  geom_path(alpha = 0.4) +
+  facet_wrap(~id) +
+  theme_bw()
+
+```
+
+```{r}
+# Check for id = 203637
+# Geom_point
+p1 <- ggplot() +
+  theme_bw() +
+  geom_point(
+    data = sharks %>% dplyr::filter(id == "203637_a"),
+    aes(x = lon, y = lat)
+  )
+
+print(p1)
+
+# Geom_path
+p2 <- ggplot() +
+  theme_bw() +
+  geom_path(
+    data = sharks %>% dplyr::filter(id == "203637_a"),
+    aes(x = lon, y = lat)
+  )
+
+print(p2)
+```
+
+#### Velocity check
+
+```{r}
+# Stepwise speed between consecutive observations
+sharks_speed <- sharks_dt %>%
+  mutate(
+    dist_m = geosphere::distHaversine(
+      cbind(lon, lat),
+      cbind(lag(lon), lag(lat))
+    ),
+    speed_ms = dist_m / (dt_hours * 3600)
+  )
+```
+
+```{r}
+ggplot(sharks_speed, aes(x = speed_ms)) +
+  geom_histogram(bins = 60) +
+  scale_x_log10() +
+  theme_bw() +
+  labs(x = "Raw speed (m/s, log scale)")
+```
+
+```{r}
+# proportion of raw steps exceeding 2.7m/s
+sharks_speed %>%
+  summarise(
+    prop_over_2_7 = mean(speed_ms > 2.7, na.rm = TRUE)
+  )
+```
+
+Approximately 12% of observed movement steps exceeded a biologically informed maximum swimming speed of 2.7 m/s.
+
+#### Sanity check
+
+Since the SSM model needs at least 3 points to fit, there are 9 sharks with less than 3 observations, which will be excluded from our further analysis.
+
+```{r}
+# Exclude individuals with fewer than three observations 
+sharks %>%
+  count(id) %>%
+  filter(n < 3)
+
+sharks_ssm <- sharks %>%
+  group_by(id) %>%
+  filter(n() >= 3) %>%
+  ungroup()
+
+sharks_ssm %>% 
+  count(id)
+```
+
+58 sharks remaining in the sharks_ssm dataframe.
+
+```{r}
+# Sanity check 
+
+# whether date contains invalid data 
+sharks_ssm %>%
+  summarise(
+    n_na_date = sum(is.na(date)),
+    n_inf_date = sum(!is.finite(as.numeric(date)))
+  )
+
+# Check whether lon / lat contains invalid data
+sharks_ssm %>%
+  summarise(
+    n_na_lon = sum(is.na(lon)),
+    n_na_lat = sum(is.na(lat))
+  )
+
+# Check whether time is monotonically increasing 
+sharks_ssm %>%
+  group_by(id) %>%
+  summarise(
+    any_non_increasing_time = any(diff(date) <= 0, na.rm = TRUE)
+  ) %>%
+  filter(any_non_increasing_time)
+
+```
+
+For the sharks that have >= 3 observations, there are 0 observations of NA date as they were initially filted out. 
+There are also non_increasing_time observations, which will be excluded.
+
+```{r}
+# Check problem ids observations
+problem_ids <- sharks_ssm %>%
+  group_by(id) %>%
+  summarise(any_non_increasing_time = any(diff(date) <= 0, na.rm = TRUE)) %>%
+  filter(any_non_increasing_time) %>%
+  pull(id)
+```
+
+```{r}
+# Duplicated rows
+sharks_ssm %>%
+  filter(id %in% problem_ids) %>%
+  count(id, date) %>%
+  filter(n > 1) %>%
+  arrange(desc(n))
+```
+
+1 duplicated entries found, will be removed.
+
+#### Cleaning dataset for the SSM
+
+```{r}
+# Final cleaned dataset used for state-space modelling
+
+sharks_ssm_clean <- sharks %>%
+  # remove rows with invalid time or coordinates
+  filter(
+    !is.na(date),
+    is.finite(as.numeric(date)),
+    !is.na(lon),
+    !is.na(lat)
+  ) %>%
+  
+  # order observations within each individual
+  arrange(id, date) %>%
+  
+  # remove duplicated timestamps within individuals
+  distinct(id, date, .keep_all = TRUE) %>%
+  
+  # ensure each individual has enough data and strictly increasing time
+  group_by(id) %>%
+  filter(
+    n() >= 3,
+    all(diff(date) > 0)
+  ) %>%
+  ungroup()
+```
+
+In sharks_ssm_clean, all 58 sharks have at least three valid observations with valid timestamps and locations.
+
+```{r}
+# Sanity check for clean data 
+nrow(sharks)
+nrow(sharks_ssm_clean)
+
+length(unique(sharks$id))
+length(unique(sharks_ssm_clean$id))
+
+sharks_ssm_clean %>%
+  group_by(id) %>%
+  summarise(any_bad_time = any(diff(date) <= 0)) %>%
+  filter(any_bad_time)
+```
+
+There are 58 sharks (12142 entries) remaining.
+
+### SSM Model Fit
+
+```{r}
+# State-space model settings:
+# - model: correlated random walk (crw)
+# - time.step: 24 hours (daily regularization)
+# - vmax: 2.7 m/s (biologically informed maximum swimming speed)
+
+sharks_crw_ssm <- fit_ssm(
+  x = sharks_ssm_clean,
+  model = "crw",
+  time.step = 24,     
+  vmax = 2.7,          
+  control = ssm_control(
+    verbose = 0       
+  )
+)
+
+# Extract fitted locations (at observation times)
+sharks_fitted <- grab(sharks_crw_ssm, what = "fitted") %>%
+  as_tibble()
+
+# Extract predicted locations (regular 24 h interval)
+sharks_predicted <- grab(sharks_crw_ssm, what = "predicted") %>%
+  as_tibble()
+
+```
+
+```{r}
+# Dataframe with convergence indicators 
+sharks_crw_ssm
+```
+
+```{r}
+# Identify individuals with non-converged SSM fits
+nonconv_ids <- sharks_crw_ssm %>%
+filter(!converged | !pdHess) %>%
+pull(id)
+
+nonconv_ids
+```
+
+One individuals ("172246_b") did not converge.
+
+```{r}
+# Inspect observation histories of non-converged individuals
+sharks_ssm_clean %>% 
+  filter(id == "172246_b")
+```
+
+2017 jumped to 2020, which is probably the reason of non-convergence.
+
+
+```{r}
+# Retain SSM fits that converged with a positive-definite Hessian
+ssm_valid <- sharks_crw_ssm %>%
+filter(converged, pdHess)
+
+# Record IDs excluded due to non-convergence
+ssm_excluded_ids <- sharks_crw_ssm %>%
+filter(!converged | !pdHess) %>%
+pull(id)
+
+ssm_excluded_ids
+```
+
+After excluding non-converged fits, 57 sharks remained for further analysis.
+
+```{r}
+# Extract fitted and predicted locations from valid SSM fits only
+sharks_fitted <- grab(ssm_valid, what = "fitted") %>%
+as_tibble()
+
+sharks_predicted <- grab(ssm_valid, what = "predicted") %>%
+as_tibble()
+```
+
+#### Visualization of model fit
+
+To illustrate model behavior under different data conditions, predicted tracks were visualized for a small number of representative individuals.
+
+```{r}
+# Individual with the minimum number of observations required for SSM fitting 
+three_obs_id <- "132071"
+
+plot(
+ssm_valid |> dplyr::filter(id == three_obs_id),
+what = "predicted",
+type = 1
+)
+
+plot(
+ssm_valid |> dplyr::filter(id == three_obs_id),
+what = "predicted",
+type = 2
+)
+
+```
+
+Individuals with extremely sparse observations showed high positional uncertainty and were not used for behavioural interpretation.
+
+```{r}
+# Individual with one of the largest temporal gaps between observations
+large_gap_id <- "112557"
+
+plot(
+ssm_valid |> dplyr::filter(id == large_gap_id),
+what = "predicted",
+type = 1
+)
+
+plot(
+ssm_valid |> dplyr::filter(id == large_gap_id),
+what = "predicted",
+type = 2
+)
+
+```
+
+```{r}
+sharks_ssm_clean %>% 
+  filter(id == "112557")
+```
+
+For this shark (id =112557), the shark has only 54 observations in 2012, with a gap of almost one year, followed by the observation almost one year, where the one year in between have huge uncertainties according to the graph.
+
+```{r}
+# Individual with a more typical observation pattern
+typical_id <- "164968"
+
+plot(
+ssm_valid |> dplyr::filter(id == typical_id),
+what = "predicted",
+type = 1
+)
+
+plot(
+ssm_valid |> dplyr::filter(id == typical_id),
+what = "predicted",
+type = 2
+)
+```
+
+This individual shows a more typical observation pattern, with stable reconstructed tracks and moderate uncertainty.
+
+```{r}
+# Typical 
+ty_id <- "203645"
+
+plot(
+ssm_valid |> dplyr::filter(id == ty_id),
+what = "predicted",
+type = 1
+)
+
+plot(
+ssm_valid |> dplyr::filter(id == ty_id),
+what = "predicted",
+type = 2
+)
+```
+
+Visualization shark track on a spatial shapefile:
+
+```{r}
+# Visualize predicted track for a representative individual
+aniMotum::map(
+ssm_valid |> dplyr::filter(id == "164968"),
+what = "predicted"
+)
+# Compared with initial raw data
+raw_164968 <- ggplot() +
+  theme_bw() +
+  geom_point(
+    data = sharks %>% dplyr::filter(id == "164968"),
+    aes(x = lon, y = lat)
+  )
+
+print(raw_164968)
+
+```
+
+All 57 shark tracks were visualized on a spatial shapefile:
+
+```{r}
+# Visualize predicted tracks for all converged individuals
+aniMotum::map(
+ssm_valid,
+what = "predicted"
+)
+```
+
+### SSM diagnostics
+
+The diagnostics are applied to the above three sharks, with 1.
+time series plot 2.
+QQ plot 3.
+ACF
+
+```{r}
+# SSM diagnostics for representative individuals
+# - sparse observations
+# - large temporal gaps
+# - typical observation pattern
+
+diagnostic_ids <- c("132071", "112557", "164968")
+
+ssm_diag <- ssm_valid |>
+dplyr::filter(id %in% diagnostic_ids)
+
+# OSAR (one step ahead residuals)
+res_diag <- osar(ssm_diag)
+
+# Time series residuals 
+plot(
+res_diag,
+type = "ts",
+pages = 1
+)
+
+# QQ plot 
+plot(
+res_diag,
+type = "qq",
+pages = 1
+)
+
+#ACF
+plot(
+res_diag,
+type = "acf",
+pages = 1
+)
+
+```
+
+Overall, the diagnostic plots do not raise major concerns about model fit.
+Residuals show no clear trends over time, their distribution is broadly consistent with model assumptions, and there is little remaining autocorrelation.
+This suggests the fitted state-space model adequately captures the movement dynamics in the data.
+
+Note: Since 175953 and 203646_b failed to converge in MPM in later steps, their diagnostics are checked
+
+```{r}
+# Additional SSM diagnostics for individuals that later failed MPM convergence
+diagnostic_ids_MPM_failed <- c("175953", "203646_b")
+
+ssm_diag_MPM_failed <- ssm_valid |>
+dplyr::filter(id %in% diagnostic_ids_MPM_failed)
+
+# OSAR (One-step-ahead residuals)
+res_diag_MPM_failed <- osar(ssm_diag_MPM_failed)
+
+# Time series residuals 
+plot(
+res_diag_MPM_failed,
+type = "ts",
+pages = 1
+)
+
+# QQ plot 
+plot(
+res_diag_MPM_failed,
+type = "qq",
+pages = 1
+)
+
+#ACF
+plot(
+res_diag_MPM_failed,
+type = "acf",
+pages = 1
+)
+```
+
+For the shark with id = 175953, the maximum time gap between consecutive observations is 2313.52 hours.
+Despite this long gap, the SSM diagnostics do not show clear violations of model assumptions.
+The residuals are generally centered around zero without strong temporal trends, the QQ plots show only mild tail deviations, and the ACF plots for both x and y mostly fall within the confidence bounds, indicating that temporal dependence is adequately captured by the CRW model.
+
+For the shark with id = 203646_b, the SSM diagnostics for this individual do not show major violations of model assumptions.
+Residuals are centred around zero with no strong temporal trends, their distribution broadly follows model expectations, and there is little remaining autocorrelation in either spatial dimension.
+These results suggest that the CRW-based state-space model provides an adequate description of the movement process for this track.
+
+### MPM (Move Persistence Model)
+
+```{r}
+# Prepare input data for MPM
+# Retain individuals with at least 20 predicted locations
+pmm_data <- sharks_predicted %>%
+dplyr::group_by(id) %>%
+dplyr::filter(dplyr::n() >= 20) %>%
+dplyr::ungroup()
+
+# Fit move persistence model
+pmm_fit <- fit_mpm(
+pmm_data,
+model = "mpm",
+control = mpm_control(verbose = 0)
+)
+
+# MPM varying gamma visulization for selected sharks
+rep_ids_gamma <- c("184025", "139119", "184029", "220359")
+
+pmm_data_sub <- sharks_predicted %>%
+  dplyr::filter(id %in% rep_ids_gamma) %>%
+  dplyr::group_by(id) %>%
+  dplyr::filter(dplyr::n() >= 20) %>%
+  dplyr::ungroup()
+
+pmm_fit_sub <- fit_mpm(
+  pmm_data_sub,
+  model = "mpm",
+  control = mpm_control(verbose = 0)
+)
+
+p_mpm <- plot(pmm_fit_sub, pages = 1)
+print(p_mpm)
+
+# Save plot
+ggsave(
+  filename = "g_over_time_representative_sharks.png",
+  plot = p_mpm,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+```
+
+
+```{r}
+# Dataframe with indicators of convergence of MPM
+pmm_fit
+```
+
+After excluding individuals with fewer than 20 predicted locations, 33 sharks were retained for MPM fitting.
+Among these, the model did not converge for two individuals (175953 and 203646_b), which were excluded from subsequent analyses.
+
+### Data Extraction and preparation
+
+```{r}
+# Extract fitted move persistence estimates
+mpm_gamma <- grab(pmm_fit, what = "fitted") %>%
+as_tibble()
+
+# Check structure
+mpm_gamma %>% glimpse()
+```
+
+```{r}
+# Combine latent locations with movement persistence
+latent_movement <- pmm_data %>%
+select(
+id, date, lon, lat,
+x, y, x.se, y.se
+) %>%
+left_join(
+mpm_gamma %>% select(id, date, g),
+by = c("id", "date")
+)
+
+# Sanity check: missing movement persistence values
+
+latent_movement %>%
+summarise(
+n_total = n(),
+n_missing_gamma = sum(is.na(g))
+)
+
+```
+
+```{r}
+# Convert latent movement dataset to sf object (WGS84)
+latent_sf <- latent_movement %>%
+st_as_sf(coords = c("lon", "lat")) %>%
+st_set_crs(4326)
+```
+
+### Mapping and exploratory visualization
+
+```{r}
+# Time series of movement persistence (gamma_t) by individual
+
+ggplot(latent_movement, aes(x = date, y = g)) +
+geom_line(alpha = 0.6) +
+facet_wrap(~ id, scales = "free_x") +
+theme_bw() +
+labs(
+x = "Date",
+y = expression(gamma[t])
+)
+
+# Spatial visualization of tracks colored by movement persistence
+
+# Load base map
+world <- rnaturalearth::ne_countries(
+scale = "medium",
+returnclass = "sf"
+)
+
+# Projection
+prj <- "+proj=laea +lat_0=0 +lon_0=0 +datum=WGS84 +units=m +no_defs"
+
+ggplot() +
+theme_bw() +
+geom_sf(data = world, fill = "grey90", colour = "grey70") +
+geom_sf(
+data = latent_sf,
+aes(colour = g),
+size = 0.7,
+alpha = 0.9
+) +
+scale_colour_viridis_c(
+name = expression(gamma[t]),
+limits = c(0, 1)
+) +
+coord_sf(crs = prj) +
+facet_wrap(~ id)
+
+```
+
+```{r}
+# Exploratory labeling of movement persistence values (used for visualization only; not treated as discrete states)
+
+latent_movement <- latent_movement %>%
+mutate(
+behaviour_class = case_when(
+g < 0.3 ~ "low_persistence",
+g > 0.7 ~ "high_persistence",
+TRUE ~ "intermediate"
+)
+)
+
+latent_movement %>%
+count(behaviour_class)
+```
+
+```{r}
+# Retain individuals with at least one valid persistence estimate
+latent_valid <- latent_movement %>%
+  group_by(id) %>%
+  filter(any(!is.na(g))) %>%
+  ungroup()
+
+# Descriptive summaries of movement persistence by individual
+behaviour_summary <- latent_valid %>%
+  group_by(id) %>%
+  summarise(
+    n_points = n(),
+    mean_g   = mean(g, na.rm = TRUE),
+    sd_g     = sd(g, na.rm = TRUE),
+    range_g  = max(g, na.rm = TRUE) - min(g, na.rm = TRUE),
+    lon_range = max(lon) - min(lon),
+    lat_range = max(lat) - min(lat)
+  ) %>%
+  ungroup()
+
+# Identify candidates with relatively typical movement persistence (used to select representative individuals for visualization)
+typical_candidates <- behaviour_summary %>%
+  filter(
+    mean_g > quantile(mean_g, 0.4, na.rm = TRUE),
+    mean_g < quantile(mean_g, 0.6, na.rm = TRUE),
+    sd_g   < quantile(sd_g,   0.5, na.rm = TRUE)
+  ) %>%
+  arrange(sd_g)
+
+typical_candidates
+
+```
+
+\subsection*{Summary statistics of movement persistence}
+
+Let $\gamma_{it} \in (0,1)$ denote the movement persistence index estimated by the move persistence model for individual $i$ at time $t$.
+To summarise individual-level movement behaviour over the tracking period, we computed the following descriptive statistics of $\gamma_{it}$.
+
+\paragraph{Mean movement persistence}
+
+$$
+\operatorname{mean}_i(\gamma_t)
+$$
+
+denoted as \texttt{mean\_g} in the analysis, represents the average level of movement persistence for individual $i$ across time.
+Values of $\operatorname{mean}_i(\gamma_t)$ close to $1$ indicate that the individual predominantly exhibits highly persistent, directional movement, consistent with migration-like behaviour.
+Values around $0.5$ reflect intermediate persistence, suggesting mixed movement strategies.
+Lower values of $\operatorname{mean}_i(\gamma_t)$ indicate movement dominated by low persistence, characterized by slower and less directed motion.
+
+\paragraph{Temporal variability in movement persistence}
+
+$$
+\operatorname{sd}_i(\gamma_t)
+$$
+
+denoted as \texttt{sd\_g}, quantifies the temporal variability of movement persistence for individual $i$.
+Low values of $\operatorname{sd}_i(\gamma_t)$ indicate relatively stable movement behaviour over time, whereas higher values reflect substantial fluctuations in persistence, corresponding to frequent transitions between more and less directed movement.
+
+\paragraph{Range of movement persistence}
+
+$$
+\operatorname{range}_i(\gamma_t)
+=
+\max_t(\gamma_{it}) - \min_t(\gamma_{it})
+$$
+
+denoted as \texttt{range\_g}, captures the extent of behavioural contrast experienced by individual $i$ during the observation period.
+A small range suggests a relatively homogeneous movement pattern, while a large range indicates that the individual experienced both highly persistent and weakly persistent movement phases.
+
+\paragraph{Overall interpretation}
+
+Together, these statistics characterize individual movement behaviour in terms of its average persistence, temporal stability, and behavioural heterogeneity.
+They are used solely for descriptive interpretation and visualization, and do not imply discrete behavioural states.
+All behavioural groupings based on these summaries are intended to aid interpretation of the continuous movement persistence process estimated by the model.
+
+```{r}
+# High persistence candidates (for visualization)
+
+high_persistence_candidates <- behaviour_summary %>%
+filter(
+mean_g > quantile(mean_g, 0.75, na.rm = TRUE),
+sd_g   < quantile(sd_g,   0.5,  na.rm = TRUE)
+) %>%
+mutate(
+spatial_extent = lon_range + lat_range
+) %>%
+arrange(desc(spatial_extent))
+
+high_persistence_candidates
+
+#Low persistence candidates (for visualization)
+low_persistence_candidates <- behaviour_summary %>%
+filter(
+mean_g < quantile(mean_g, 0.25, na.rm = TRUE)
+) %>%
+arrange(sd_g)
+
+low_persistence_candidates
+
+# Highly variable persistence candidates
+
+variable_persistence_candidates <- behaviour_summary %>%
+filter(
+sd_g > quantile(sd_g, 0.75, na.rm = TRUE)
+) %>%
+arrange(desc(sd_g))
+
+variable_persistence_candidates
+
+```
+
+Here, n_points represents the number of regularized latent track points used by the move persistence model.
+
+```{r}
+list(
+typical      = typical_candidates$id,
+high_persist = high_persistence_candidates$id,
+low_persist  = low_persistence_candidates$id,
+variable     = variable_persistence_candidates$id
+)
+
+```
+
+```{r}
+# Representative individuals selected for visualization
+# (illustrating different persistence patterns)
+
+rep_ids <- c(
+  "184025",  # typical
+  "139119",  # high persistence
+  "184029",  # low persistence
+  "220359"   # variable
+)
+
+latent_rep <- latent_movement %>%
+  dplyr::filter(id %in% rep_ids)
+
+id_labels <- tibble(
+  id = rep_ids,
+  behaviour = c(
+    "Typical",
+    "High persistence",
+    "Low persistence",
+    "Highly variable"
+  )
+)
+
+latent_rep <- latent_rep %>%
+  left_join(id_labels, by = "id") %>%
+  mutate(
+    behaviour = factor(
+      behaviour,
+      levels = c(
+        "Typical",
+        "High persistence",
+        "Low persistence",
+        "Highly variable"
+      )
+    )
+  )
+
+# Transform to sf (WGS84)
+latent_rep_sf <- latent_rep %>%
+  sf::st_as_sf(coords = c("lon", "lat")) %>%
+  sf::st_set_crs(4326)
+
+# Projection
+prj <- "+proj=laea +lat_0=0 +lon_0=-90 +datum=WGS84 +units=m +no_defs"
+
+latent_rep_proj <- latent_rep_sf %>%
+  sf::st_transform(crs = prj)
+
+# In meters
+bbox_proj <- sf::st_bbox(latent_rep_proj)
+
+x_buffer <- 5e5   # 500 km buffer
+y_buffer <- 5e5
+
+xlim_zoom <- c(
+  bbox_proj["xmin"] - x_buffer,
+  bbox_proj["xmax"] + x_buffer
+)
+
+ylim_zoom <- c(
+  bbox_proj["ymin"] - y_buffer,
+  bbox_proj["ymax"] + y_buffer
+)
+
+world <- rnaturalearth::ne_countries(
+  scale = "medium",
+  returnclass = "sf"
+)
+
+world_proj <- world %>%
+  sf::st_transform(crs = prj)
+
+p_g_spatial<- ggplot() +
+  theme_bw() +
+  geom_sf(
+    data = world_proj,
+    fill = "grey90",
+    colour = "grey70",
+    linewidth = 0.2
+  ) +
+  geom_sf(
+    data = latent_rep_proj,
+    aes(colour = g),
+    size = 1,
+    alpha = 0.9
+  ) +
+  scale_colour_viridis_c(
+    name = expression(gamma[t]),
+    limits = c(0, 1)
+  ) +
+  coord_sf(
+    crs = prj,
+    xlim = xlim_zoom,
+    ylim = ylim_zoom,
+    expand = FALSE
+  ) +
+  facet_wrap(~ behaviour + id, ncol = 2)
+
+print(p_g_spatial)
+
+# Save Plot
+ggsave(
+  filename = "g_spatial_representative_sharks.png",
+  plot = p_g_spatial,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+```
+
+The overview map uses a shared spatial scale across individuals, which facilitates comparison of movement extent but compresses trajectories with smaller spatial ranges.
+To highlight individual-level movement geometry, there are additionally maps zoomed to the spatial extent of each track.
+
+```{r}
+# Zoom in map
+plot_one_shark_map <- function(
+  latent_data,
+  shark_id,
+  behaviour_label,
+  prj,
+  buffer_km = 300
+) {
+
+  # subset one individual
+  df_one <- latent_data %>%
+    dplyr::filter(id == shark_id)
+
+  # convert to sf (lon/lat)
+  sf_one <- df_one %>%
+    sf::st_as_sf(coords = c("lon", "lat")) %>%
+    sf::st_set_crs(4326) %>%
+    sf::st_transform(crs = prj)
+
+  # bounding box in projected CRS (meters)
+  bb <- sf::st_bbox(sf_one)
+
+  buffer_m <- buffer_km * 1000
+
+  xlim <- c(bb["xmin"] - buffer_m, bb["xmax"] + buffer_m)
+  ylim <- c(bb["ymin"] - buffer_m, bb["ymax"] + buffer_m)
+
+  # world map
+  world_proj <- rnaturalearth::ne_countries(
+    scale = "medium",
+    returnclass = "sf"
+  ) %>%
+    sf::st_transform(crs = prj)
+
+  # plot
+  ggplot() +
+    theme_bw() +
+    geom_sf(
+      data = world_proj,
+      fill = "grey90",
+      colour = "grey70",
+      linewidth = 0.2
+    ) +
+    geom_sf(
+      data = sf_one,
+      aes(colour = g),
+      size = 1.2
+    ) +
+    scale_colour_viridis_c(
+      name = expression(gamma[t]),
+      limits = c(0, 1)
+    ) +
+    coord_sf(
+      crs = prj,
+      xlim = xlim,
+      ylim = ylim,
+      expand = FALSE
+    ) +
+    labs(
+      title = behaviour_label,
+      subtitle = paste("ID:", shark_id)
+    )
+}
+
+prj <- "+proj=laea +lat_0=0 +lon_0=-90 +datum=WGS84 +units=m +no_defs"
+
+# Typical 
+plot_one_shark_map(
+  latent_data = latent_movement,
+  shark_id = "184025",
+  behaviour_label = "Typical",
+  prj = prj,
+  buffer_km = 300
+)
+
+# High persistence
+plot_one_shark_map(
+  latent_data = latent_movement,
+  shark_id = "139119",
+  behaviour_label = "High persistence",
+  prj = prj,
+  buffer_km = 500   
+)
+
+# Low persistence
+plot_one_shark_map(
+  latent_data = latent_movement,
+  shark_id = "184029",
+  behaviour_label = "Low persistence",
+  prj = prj,
+  buffer_km = 200
+)
+
+# Highly variable 
+plot_one_shark_map(
+  latent_data = latent_movement,
+  shark_id = "220359",
+  behaviour_label = "Highly variable",
+  prj = prj,
+  buffer_km = 200
+)
+
+
+```
+
+```{r}
+# Check 
+plot_one_shark_map(
+  latent_data = latent_movement,
+  shark_id = "203645",
+  behaviour_label = "/",
+  prj = prj,
+  buffer_km = 500   
+)
+```
+
+```{r}
+saveRDS(sharks_ssm_clean, "sharks_ssm_clean.rds")
+```
+

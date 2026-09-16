@@ -1,0 +1,86 @@
+---
+title: "EnvironmentFactorsBuild"
+author: "Leo Lyu"
+date: "2026-03-15"
+output: pdf_document
+---
+
+```{r}
+library(rerddap)
+library(rerddapXtracto)
+library(dplyr)
+library(readr)
+
+```
+
+```{r}
+analysis_df <- readRDS("shark_analysis_df.rds")
+analysis_df$date_day <- as.Date(analysis_df$date)
+
+analysis_df$sst <- NA_real_
+analysis_df$chlorophyll <- NA_real_
+
+# Convert longitude for chlorophyll dataset if needed
+analysis_df$lon_360 <- ifelse(analysis_df$lon < 0,
+                              analysis_df$lon + 360,
+                              analysis_df$lon)
+
+years <- unique(format(analysis_df$date_day, "%Y"))
+
+sstInfo <- rerddap::info("ncdcOisst21Agg_LonPM180")
+chlInfo <- rerddap::info("erdMBchla1day")
+
+for (yr in years) {
+  message("Processing year: ", yr)
+
+  idx <- format(analysis_df$date_day, "%Y") == yr
+  sub_df <- analysis_df[idx, ]
+  if (nrow(sub_df) == 0) next
+
+  # SST extraction
+  sst_year <- rxtracto(
+    sstInfo,
+    parameter = "sst",
+    xcoord = sub_df$lon,
+    ycoord = sub_df$lat,
+    zcoord = rep(0, nrow(sub_df)),
+    tcoord = sub_df$date_day,
+    zName = "zlev",
+    xName = "longitude",
+    yName = "latitude",
+    tName = "time",
+    verbose = FALSE
+  )
+
+  print(names(sst_year))
+
+  if ("mean sst" %in% names(sst_year)) {
+    analysis_df$sst[idx] <- sst_year[["mean sst"]]
+  }
+
+  # Chlorophyll extraction
+  chl_year <- rxtracto(
+    chlInfo,
+    parameter = "chlorophyll",
+    xcoord = sub_df$lon_360,
+    ycoord = sub_df$lat,
+    zcoord = rep(0, nrow(sub_df)),
+    tcoord = sub_df$date_day,
+    zName = "altitude",
+    xName = "longitude",
+    yName = "latitude",
+    tName = "time",
+    verbose = FALSE
+  )
+
+  print(names(chl_year))
+
+  if ("mean chlorophyll" %in% names(chl_year)) {
+    analysis_df$chlorophyll[idx] <- chl_year[["mean chlorophyll"]]
+  }
+
+  gc()
+}
+
+write_csv(analysis_df, "shark_analysis_with_sst_chl.csv")
+

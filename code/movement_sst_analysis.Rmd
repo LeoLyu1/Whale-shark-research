@@ -1,0 +1,403 @@
+---
+title: "Movement with SST Analysis"
+author: "Madelyne Zhang, Leo Lyu"
+date: "`r Sys.Date()`"
+output:
+  bookdown::html_document2:
+    number_sections: true
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: flatly
+    highlight: pygments
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r}
+# Load required packages
+library(dplyr)
+library(ggplot2)
+library(mgcv)
+library(lme4)
+library(readr)
+library(patchwork)
+
+# Read dataset with SST already merged
+analysis_df <- read_csv("shark_analysis_with_sst.csv")
+
+
+sharks_predicted <- readRDS("sharks_predicted_segments.rds")
+
+sharks_fitted <- readRDS("sharks_fitted_segments.rds")
+
+sharks_ssm_input <- readRDS("sharks_ssm_input_segments.rds")
+
+# Rename movement persistence parameter
+analysis_df$gamma <- analysis_df$g
+```
+```{r}
+names(analysis_df)
+```
+
+
+
+```{r}
+# Basic sanity checks
+summary(analysis_df$gamma)
+summary(analysis_df$sst)
+
+# Check missing values
+sum(is.na(analysis_df$gamma))
+sum(is.na(analysis_df$sst))
+```
+
+```{r}
+# distribution of gamma
+ggplot(analysis_df, aes(x = gamma)) +
+  geom_histogram(bins = 40, fill = "steelblue", alpha = 0.8) +
+  theme_minimal() +
+  labs(
+    x = "Gamma (movement persistence)",
+    y = "Count"
+  )
+```
+
+## Gamma VS Temperature
+
+```{r}
+# Scatter plot of gamma vs SST
+ggplot(analysis_df, aes(x = sst, y = gamma)) +
+  geom_point(alpha = 0.25) +
+  geom_smooth(method = "loess", se = TRUE) +
+  theme_minimal() +
+  labs(
+    x = "Sea Surface Temperature (°C)",
+    y = "Gamma (movement persistence)"
+  )
+```
+
+The scatter plot of gamma against sea surface temperature suggests that the relationship between movement persistence and temperature is not strictly linear. The loess smoothing curve indicates a moderate decrease in gamma from lower temperatures (around 18–22°C), followed by a slight increase around 24–26°C, and then a clearer downward trend at higher temperatures (above approximately 26°C).
+
+There appears to be considerable variability in gamma values, particularly at higher temperatures, where both high and low persistence values are observed. The confidence band also widens at the lower temperature range, likely reflecting fewer observations in that region.
+
+The figure suggests a potentially nonlinear association between temperature and movement persistence, with gamma possibly peaking at intermediate temperatures and declining at the higher end of the observed temperature range. Therefore, further regression analysis is needed to assess whether this pattern is statistically supported.
+
+```{r}
+# Gamma vs SST by individual shark
+ggplot(analysis_df, aes(x = sst, y = gamma)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "loess", se = FALSE) +
+  facet_wrap(~ id) +
+  theme_minimal() +
+  labs(
+    x = "Sea Surface Temperature (°C)",
+    y = "Gamma"
+  )
+```
+
+### Linear Mixed-Effects Model (LMM fit) 
+
+```{r}
+# Basic linear regression， random effect on id 
+fit_lmm <- lmer(gamma ~ sst + (1 | id), data = analysis_df)
+
+summary(fit_lmm)
+```
+
+The mixed-effects model indicates substantial between-individual variability in baseline movement persistence, as the random intercept variance (0.043) exceeds the residual variance (0.020). This suggests that differences among sharks contribute more to overall variation in gamma than within-individual fluctuations. After accounting for this individual-level heterogeneity, sea surface temperature remains negatively associated with movement persistence, with gamma decreasing by approximately 0.019 units per 1°C increase in SST.
+
+Residual plots:
+```{r}
+# Extract fitted values and residuals
+model_df <- model.frame(fit_lmm)
+
+model_df$fitted_lmm <- fitted(fit_lmm)
+model_df$resid_lmm  <- resid(fit_lmm)
+
+# Residual vs fitted
+ggplot(model_df, aes(x = fitted_lmm, y = resid_lmm)) +
+  geom_point(alpha = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  theme_minimal() +
+  labs(
+    x = "Fitted values",
+    y = "Residuals"
+  )
+# QQ plot of residuals
+qqnorm(model_df$resid_lmm)
+qqline(model_df$resid_lmm)
+```
+
+The residuals are approximately centered around zero, and there is no clear nonlinear pattern in the mean structure. However, the spread of residuals appears to vary across the range of fitted values, suggesting potential heteroscedasticity. In particular, variability seems larger in the mid-range of fitted values and more compressed at higher fitted values.
+
+The Q–Q plot indicates that residuals deviate from normality, especially in the tails. While the central portion of the distribution roughly follows the reference line, both lower and upper tails show noticeable departures, suggesting heavier tails than expected under a normal distribution.
+
+
+### Logit-transformed Linear Mixed-Effects Model
+
+```{r}
+# Estimation dataset
+model_df <- model.frame(fit_lmm)
+
+# Logit transform gamma (trim， avoid 0/1 issues)
+model_df$gamma_trim <- pmin(pmax(model_df$gamma, 0.001), 0.999)
+model_df$gamma_logit <- qlogis(model_df$gamma_trim)
+```
+
+```{r}
+# Logit-scale mixed model with random intercept
+fit_lmm_logit <- lmer(gamma_logit ~ sst + (1 | id), data = model_df)
+
+summary(fit_lmm_logit)
+```
+
+```{r}
+model_df$fitted_logit <- fitted(fit_lmm_logit)
+model_df$resid_logit  <- resid(fit_lmm_logit)
+
+ggplot(model_df, aes(x = fitted_logit, y = resid_logit)) +
+  geom_point(alpha = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  theme_minimal() +
+  labs(x = "Fitted values (logit scale)", y = "Residuals")
+```
+
+```{r}
+qqnorm(model_df$resid_logit)
+qqline(model_df$resid_logit)
+```
+
+After applying a logit transformation to gamma and fitting a linear mixed-effects model with a random intercept for track ID, the negative association between SST and movement persistence remained statistically significant. The estimated coefficient for SST on the logit scale was −0.16, indicating that higher sea surface temperature is associated with lower movement persistence.
+
+The variance of the random intercept (2.32) was substantially larger than the residual variance (0.97), suggesting considerable between-track variability in baseline movement persistence. However, residual diagnostics still indicated heteroscedasticity and noticeable departures from normality, particularly in the tails of the distribution. Therefore, while the logit transformation addresses the bounded nature of gamma, it does not fully resolve the model assumption violations observed in the Gaussian mixed-effects framework.
+
+### Beta GAMM
+
+Beta GAMM + logit link + random effect
+```{r}
+model_df$gamma_beta <- pmin(pmax(model_df$gamma, 0.001), 0.999)
+
+fit_gamm_beta <- gam(
+  gamma_beta ~ s(sst, k = 10) + s(id, bs = "re"),
+  family = betar(link = "logit"),
+  data = model_df,
+  method = "REML"
+)
+
+summary(fit_gamm_beta)
+```
+
+The beta GAMM with a logit link indicates a significant nonlinear association between SST and movement persistence (edf = 5.01, p < 2e-16). Movement persistence tends to decrease as SST increases, with a more pronounced decline at higher temperature ranges. The significant random effect for ID suggests substantial between-individual variability. Overall, the model explains 69.9% of the deviance, indicating a strong fit to the data.
+
+```{r}
+newdat <- data.frame(
+  sst = seq(min(model_df$sst), max(model_df$sst), length.out = 200),
+  id = model_df$id[1]
+)
+
+pred <- predict(fit_gamm_beta, newdat, type = "response", se.fit = TRUE)
+
+newdat$fit   <- pred$fit
+newdat$upper <- pred$fit + 2 * pred$se.fit
+newdat$lower <- pred$fit - 2 * pred$se.fit
+
+ggplot(model_df, aes(x = sst, y = gamma)) +
+  geom_point(alpha = 0.2) +
+  geom_line(data = newdat,
+            aes(x = sst, y = fit),
+            inherit.aes = FALSE,
+            color = "blue",
+            linewidth = 1) +
+  geom_ribbon(data = newdat,
+              aes(x = sst, ymin = lower, ymax = upper),
+              inherit.aes = FALSE,
+              alpha = 0.2) +
+  theme_minimal()
+```
+
+
+## Predicted VS Observed tracks 
+
+### Example shark
+
+```{r}
+example_id <- "108113_0"
+
+obs_one <- sharks_ssm_input %>%
+  filter(id == example_id)
+
+pred_one <- sharks_predicted %>%
+  filter(id == example_id)
+
+
+time_range <- range(c(obs_one$date, pred_one$date), na.rm = TRUE)
+
+
+lon_range <- range(c(obs_one$lon, pred_one$lon), na.rm = TRUE)
+lat_range <- range(c(obs_one$lat, pred_one$lat), na.rm = TRUE)
+
+buffer_lon <- diff(lon_range) * 0.05
+buffer_lat <- diff(lat_range) * 0.05
+
+
+p_lat <- ggplot() +
+  geom_line(
+    data = pred_one,
+    aes(x = date, y = lat),
+    colour = "red",
+    linewidth = 1
+  ) +
+  geom_point(
+    data = obs_one,
+    aes(x = date, y = lat, colour = factor(lc)),
+    size = 1.5
+  ) +
+  coord_cartesian(xlim = time_range) +
+  theme_classic() +
+  labs(y = "Latitude", x = NULL, colour = "Argos class")
+
+
+p_lon <- ggplot() +
+  geom_line(
+    data = pred_one,
+    aes(x = date, y = lon),
+    colour = "red",
+    linewidth = 1
+  ) +
+  geom_point(
+    data = obs_one,
+    aes(x = date, y = lon, colour = factor(lc)),
+    size = 1.5
+  ) +
+  coord_cartesian(xlim = time_range) +
+  theme_classic() +
+  labs(y = "Longitude", x = NULL, colour = "Argos class")
+
+
+p_space <- ggplot() +
+  geom_path(
+    data = pred_one,
+    aes(x = lon, y = lat),
+    colour = "red",
+    linewidth = 1
+  ) +
+  geom_point(
+    data = obs_one,
+    aes(x = lon, y = lat, colour = factor(lc)),
+    size = 1.5
+  ) +
+  coord_equal(
+    xlim = c(lon_range[1] - buffer_lon,
+             lon_range[2] + buffer_lon),
+    ylim = c(lat_range[1] - buffer_lat,
+             lat_range[2] + buffer_lat)
+  ) +
+  theme_classic() +
+  labs(
+    x = "Longitude",
+    y = "Latitude",
+    title = paste("ID:", example_id),
+    colour = "Argos class"
+  )
+
+(p_lat | p_lon) / p_space +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "right")
+```
+
+### Looping for all sharks 
+
+```{r}
+
+pdf("Predicted_Observed_tracks.pdf", width = 11, height = 8)
+
+for(i in unique(sharks_predicted$id)){
+
+  obs_one  <- sharks_ssm_input %>% filter(id == i)
+  pred_one <- sharks_predicted  %>% filter(id == i)
+
+
+  time_range <- range(c(obs_one$date, pred_one$date), na.rm = TRUE)
+
+
+  lon_range <- range(c(obs_one$lon, pred_one$lon), na.rm = TRUE)
+  lat_range <- range(c(obs_one$lat, pred_one$lat), na.rm = TRUE)
+
+  buffer_lon <- diff(lon_range) * 0.05
+  buffer_lat <- diff(lat_range) * 0.05
+
+
+  p_lon <- ggplot() +
+    geom_line(
+      data = pred_one,
+      aes(x = date, y = lon),
+      colour = "red",
+      linewidth = 0.8
+    ) +
+    geom_point(
+      data = obs_one,
+      aes(x = date, y = lon, colour = factor(lc)),
+      size = 1.2
+    ) +
+    coord_cartesian(xlim = time_range) +
+    theme_classic() +
+    labs(y = "Longitude", x = NULL, colour = "Argos class")
+
+
+  p_lat <- ggplot() +
+    geom_line(
+      data = pred_one,
+      aes(x = date, y = lat),
+      colour = "red",
+      linewidth = 0.8
+    ) +
+    geom_point(
+      data = obs_one,
+      aes(x = date, y = lat, colour = factor(lc)),
+      size = 1.2
+    ) +
+    coord_cartesian(xlim = time_range) +
+    theme_classic() +
+    labs(y = "Latitude", x = "Time", colour = "Argos class")
+
+
+  p_space <- ggplot() +
+    geom_path(
+      data = pred_one,
+      aes(x = lon, y = lat),
+      colour = "red",
+      linewidth = 0.8
+    ) +
+    geom_point(
+      data = obs_one,
+      aes(x = lon, y = lat, colour = factor(lc)),
+      size = 1.2
+    ) +
+    coord_equal(
+      xlim = c(lon_range[1] - buffer_lon,
+               lon_range[2] + buffer_lon),
+      ylim = c(lat_range[1] - buffer_lat,
+               lat_range[2] + buffer_lat)
+    ) +
+    theme_classic() +
+    labs(
+      x = "Longitude",
+      y = "Latitude",
+      title = paste("ID:", i),
+      colour = "Argos class"
+    )
+
+
+  combined_plot <- (p_lat | p_lon) / p_space +
+    plot_layout(guides = "collect") &
+    theme(legend.position = "right")
+
+  print(combined_plot)
+}
+
+dev.off()
+```
+
+
