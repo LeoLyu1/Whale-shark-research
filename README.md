@@ -19,9 +19,8 @@ Movement persistence describes directional consistency rather than a complete be
 
 - [Final report](whale_shark_final.pdf) — full methods, results, and diagnostics.
 - [Exploratory analysis](Whale_shark_EDA.pdf) — initial data exploration.
-- [Analysis code](code/) — movement modeling, environmental data construction, and sensitivity analyses.
+- [Analysis code](code/)
 - [Presentations](presentations/) — progress and final presentation materials.
 
 **Tools:** R, aniMotum, mgcv, sf, dplyr, ggplot2, rerddap, and rerddapXtracto.
 
-The scripts use external telemetry and environmental inputs; the repository does not include all data required to reproduce the analysis.
